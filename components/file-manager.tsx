@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,6 +26,9 @@ import {
   FolderOpenIcon,
   ArrowRight01Icon,
   Edit01Icon,
+  Cancel01Icon,
+  CheckmarkCircle01Icon,
+  AlertCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +38,13 @@ interface FileItem {
   size: number;
   modified: string;
   path: string;
+}
+
+interface UploadProgress {
+  file: File;
+  progress: number;
+  status: "uploading" | "success" | "error";
+  error?: string;
 }
 
 interface FileManagerProps {
@@ -49,6 +60,9 @@ export function FileManager({ className }: FileManagerProps) {
   const [renameValue, setRenameValue] = useState("");
   const [showMoveDialog, setShowMoveDialog] = useState<string | null>(null);
   const [moveDestinationPath, setMoveDestinationPath] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<
+    Map<string, UploadProgress>
+  >(new Map());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
@@ -67,23 +81,133 @@ export function FileManager({ className }: FileManagerProps) {
     },
   });
 
-  // Upload mutation
-  const uploadMutation = useMutation({
-    mutationFn: async ({ file, path }: { file: File; path: string }) => {
+  // Upload function with progress tracking
+  const uploadFileWithProgress = async (
+    file: File,
+    path: string
+  ): Promise<void> => {
+    const fileId = `${file.name}-${Date.now()}`;
+
+    // Initialize upload progress
+    setUploadProgress((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(fileId, {
+        file,
+        progress: 0,
+        status: "uploading",
+      });
+      return newMap;
+    });
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
       const formData = new FormData();
       formData.append("file", file);
       formData.append("path", path);
-      const response = await fetch("/api/files", {
-        method: "POST",
-        body: formData,
+
+      // Track upload progress
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) {
+          const progress = Math.round((e.loaded / e.total) * 100);
+          setUploadProgress((prev) => {
+            const newMap = new Map(prev);
+            const existing = newMap.get(fileId);
+            if (existing) {
+              newMap.set(fileId, { ...existing, progress });
+            }
+            return newMap;
+          });
+        }
       });
-      if (!response.ok) throw new Error("Failed to upload file");
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["files"] });
-    },
-  });
+
+      // Handle completion
+      xhr.addEventListener("load", () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // Mark as success
+          setUploadProgress((prev) => {
+            const newMap = new Map(prev);
+            const existing = newMap.get(fileId);
+            if (existing) {
+              newMap.set(fileId, {
+                ...existing,
+                progress: 100,
+                status: "success",
+              });
+            }
+            return newMap;
+          });
+
+          // Remove from progress after 2 seconds
+          setTimeout(() => {
+            setUploadProgress((prev) => {
+              const newMap = new Map(prev);
+              newMap.delete(fileId);
+              return newMap;
+            });
+          }, 2000);
+
+          queryClient.invalidateQueries({ queryKey: ["files"] });
+          resolve();
+        } else {
+          // Handle error response
+          let errorMessage = "Failed to upload file";
+          try {
+            const errorData = JSON.parse(xhr.responseText);
+            errorMessage = errorData.error || errorMessage;
+          } catch {
+            // If response is not JSON, use status text
+            errorMessage = xhr.statusText || errorMessage;
+          }
+
+          setUploadProgress((prev) => {
+            const newMap = new Map(prev);
+            const existing = newMap.get(fileId);
+            if (existing) {
+              newMap.set(fileId, {
+                ...existing,
+                status: "error",
+                error: errorMessage,
+              });
+            }
+            return newMap;
+          });
+
+          reject(new Error(errorMessage));
+        }
+      });
+
+      // Handle network errors
+      xhr.addEventListener("error", () => {
+        const errorMessage = "Network error. Please check your connection.";
+        setUploadProgress((prev) => {
+          const newMap = new Map(prev);
+          const existing = newMap.get(fileId);
+          if (existing) {
+            newMap.set(fileId, {
+              ...existing,
+              status: "error",
+              error: errorMessage,
+            });
+          }
+          return newMap;
+        });
+        reject(new Error(errorMessage));
+      });
+
+      // Handle abort
+      xhr.addEventListener("abort", () => {
+        setUploadProgress((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(fileId);
+          return newMap;
+        });
+        reject(new Error("Upload cancelled"));
+      });
+
+      xhr.open("POST", "/api/files");
+      xhr.send(formData);
+    });
+  };
 
   // Delete mutation
   const deleteMutation = useMutation({
@@ -190,12 +314,16 @@ export function FileManager({ className }: FileManagerProps) {
     },
   });
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      Array.from(files).forEach((file) => {
-        uploadMutation.mutate({ file, path: currentPath });
-      });
+      // Upload all files in parallel
+      const uploadPromises = Array.from(files).map((file) =>
+        uploadFileWithProgress(file, currentPath).catch((error) => {
+          console.error(`Error uploading ${file.name}:`, error);
+        })
+      );
+      await Promise.allSettled(uploadPromises);
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -506,6 +634,67 @@ export function FileManager({ className }: FileManagerProps) {
         </div>
       )}
 
+      {/* Upload Progress */}
+      {uploadProgress.size > 0 && (
+        <div className="border-b p-4 bg-muted/30 space-y-2">
+          <h3 className="text-sm font-medium mb-2">Upload Progress</h3>
+          {Array.from(uploadProgress.entries()).map(([fileId, progress]) => (
+            <div key={fileId} className="space-y-1">
+              <div className="flex items-center justify-between text-sm">
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  <HugeiconsIcon
+                    icon={File01Icon}
+                    className="h-4 w-4 shrink-0 text-muted-foreground"
+                  />
+                  <span className="truncate">{progress.file.name}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    {formatFileSize(progress.file.size)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {progress.status === "uploading" && (
+                    <Badge variant="outline" className="text-xs">
+                      {progress.progress}%
+                    </Badge>
+                  )}
+                  {progress.status === "success" && (
+                    <Badge className="bg-green-500 text-white">
+                      <HugeiconsIcon
+                        icon={CheckmarkCircle01Icon}
+                        className="h-3 w-3 mr-1"
+                      />
+                      Complete
+                    </Badge>
+                  )}
+                  {progress.status === "error" && (
+                    <Badge variant="destructive" className="text-xs">
+                      <HugeiconsIcon
+                        icon={AlertCircleIcon}
+                        className="h-3 w-3 mr-1"
+                      />
+                      Error
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              {progress.status === "uploading" && (
+                <div className="w-full bg-muted rounded-full h-2">
+                  <div
+                    className="bg-primary h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${progress.progress}%` }}
+                  />
+                </div>
+              )}
+              {progress.status === "error" && progress.error && (
+                <p className="text-xs text-destructive mt-1">
+                  {progress.error}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* File List */}
       <div className="flex-1 overflow-auto p-4">
         {isLoading && (
@@ -516,7 +705,20 @@ export function FileManager({ className }: FileManagerProps) {
 
         {error && (
           <div className="flex items-center justify-center h-64">
-            <p className="text-destructive">Error loading files</p>
+            <div className="text-center">
+              <HugeiconsIcon
+                icon={AlertCircleIcon}
+                className="h-8 w-8 text-destructive mx-auto mb-2"
+              />
+              <p className="text-destructive font-medium">
+                Error loading files
+              </p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {error instanceof Error
+                  ? error.message
+                  : "An unexpected error occurred"}
+              </p>
+            </div>
           </div>
         )}
 

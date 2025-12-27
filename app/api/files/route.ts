@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
       );
 
       return NextResponse.json({ items, currentPath: folderPath });
-    } catch (error) {
+    } catch {
       return NextResponse.json({ error: "Folder not found" }, { status: 404 });
     }
   } catch (error) {
@@ -70,22 +70,67 @@ export async function POST(request: NextRequest) {
       const folderName = formData.get("name") as string;
       const folderPath = (formData.get("path") as string) || "";
 
-      if (!folderName) {
+      if (!folderName || folderName.trim().length === 0) {
         return NextResponse.json(
-          { error: "Folder name required" },
+          { error: "Folder name is required" },
           { status: 400 }
         );
       }
 
-      const targetPath = path.join(UPLOAD_DIR, folderPath, folderName);
+      // Validate folder name
+      const invalidChars = /[<>:"|?*\x00-\x1f]/;
+      if (invalidChars.test(folderName)) {
+        return NextResponse.json(
+          { error: "Folder name contains invalid characters" },
+          { status: 400 }
+        );
+      }
+
+      const targetPath = path.join(UPLOAD_DIR, folderPath, folderName.trim());
       const resolvedPath = path.resolve(targetPath);
 
       if (!resolvedPath.startsWith(path.resolve(UPLOAD_DIR))) {
-        return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+        return NextResponse.json(
+          { error: "Invalid folder path" },
+          { status: 400 }
+        );
       }
 
-      await fs.mkdir(targetPath, { recursive: true });
-      return NextResponse.json({ success: true, message: "Folder created" });
+      try {
+        // Check if folder already exists
+        await fs.access(targetPath);
+        return NextResponse.json(
+          { error: `A folder with the name "${folderName}" already exists` },
+          { status: 409 }
+        );
+      } catch {
+        // Folder doesn't exist, which is good
+      }
+
+      try {
+        await fs.mkdir(targetPath, { recursive: true });
+        return NextResponse.json({
+          success: true,
+          message: "Folder created successfully",
+        });
+      } catch (error) {
+        console.error("Error creating folder:", error);
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError.code === "EACCES" || nodeError.code === "EPERM") {
+          return NextResponse.json(
+            { error: "Permission denied. Unable to create folder" },
+            { status: 403 }
+          );
+        }
+        return NextResponse.json(
+          {
+            error: `Failed to create folder: ${
+              nodeError.message || "Unknown error"
+            }`,
+          },
+          { status: 500 }
+        );
+      }
     }
 
     // Upload file
@@ -96,9 +141,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    if (file.size > 10 * 1024 * 1024) {
+    // Validate file size
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
-        { error: "File size exceeds 10MB" },
+        {
+          error: `File size (${(file.size / 1024 / 1024).toFixed(
+            2
+          )}MB) exceeds the maximum allowed size of 10MB`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Validate file name
+    if (!file.name || file.name.trim().length === 0) {
+      return NextResponse.json({ error: "Invalid file name" }, { status: 400 });
+    }
+
+    // Check for invalid characters in filename
+    const invalidChars = /[<>:"|?*\x00-\x1f]/;
+    if (invalidChars.test(file.name)) {
+      return NextResponse.json(
+        { error: "File name contains invalid characters" },
         { status: 400 }
       );
     }
@@ -106,23 +171,87 @@ export async function POST(request: NextRequest) {
     const targetDir = path.join(UPLOAD_DIR, uploadPath);
     const resolvedDir = path.resolve(targetDir);
 
+    // Security: Ensure path is within UPLOAD_DIR
     if (!resolvedDir.startsWith(path.resolve(UPLOAD_DIR))) {
-      return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid upload path" },
+        { status: 400 }
+      );
     }
 
-    await fs.mkdir(targetDir, { recursive: true });
+    try {
+      await fs.mkdir(targetDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating directory:", error);
+      return NextResponse.json(
+        { error: "Failed to create directory" },
+        { status: 500 }
+      );
+    }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
     const filePath = path.join(targetDir, file.name);
 
-    await fs.writeFile(filePath, buffer);
+    // Check if file already exists
+    try {
+      await fs.access(filePath);
+      return NextResponse.json(
+        { error: `A file with the name "${file.name}" already exists` },
+        { status: 409 }
+      );
+    } catch {
+      // File doesn't exist, which is good
+    }
 
-    return NextResponse.json({ success: true, message: "File uploaded" });
+    try {
+      const bytes = await file.arrayBuffer();
+      const buffer = Buffer.from(bytes);
+      await fs.writeFile(filePath, buffer);
+    } catch (error) {
+      console.error("Error writing file:", error);
+      const nodeError = error as NodeJS.ErrnoException;
+
+      // Check for disk space errors
+      if (nodeError.code === "ENOSPC") {
+        return NextResponse.json(
+          { error: "Not enough disk space to save the file" },
+          { status: 507 }
+        );
+      }
+
+      // Check for permission errors
+      if (nodeError.code === "EACCES" || nodeError.code === "EPERM") {
+        return NextResponse.json(
+          { error: "Permission denied. Unable to write file" },
+          { status: 403 }
+        );
+      }
+
+      return NextResponse.json(
+        {
+          error: `Failed to save file: ${nodeError.message || "Unknown error"}`,
+        },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "File uploaded successfully",
+    });
   } catch (error) {
     console.error("Error uploading file:", error);
+    const nodeError = error as NodeJS.ErrnoException;
+
+    // Handle specific error types
+    if (nodeError.code === "ENOENT") {
+      return NextResponse.json(
+        { error: "Directory not found" },
+        { status: 404 }
+      );
+    }
+
     return NextResponse.json(
-      { error: "Failed to upload file" },
+      { error: nodeError.message || "Failed to upload file" },
       { status: 500 }
     );
   }
