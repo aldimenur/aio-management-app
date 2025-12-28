@@ -142,7 +142,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate file size
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 10MB
     if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
         {
