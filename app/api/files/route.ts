@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 
-const UPLOAD_DIR = path.join(process.cwd(), "storage");
+const UPLOAD_DIR = path.join(process.cwd(), process.env.DATA_DIR as string);
+if (!UPLOAD_DIR) {
+  throw new Error("UPLOAD_DIR is not set");
+}
 
 // Ensure storage directory exists
 async function ensureStorageDir() {

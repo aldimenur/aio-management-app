@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-const CHAT_FILE_PATH = path.join(process.cwd(), "storage", "chat.json");
+const CHAT_FILE_PATH = path.join(process.cwd(), process.env.CHAT_DIR as string, "chat.json");
 
 export interface ChatMessage {
   id: string;

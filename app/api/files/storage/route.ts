@@ -5,7 +5,10 @@ import { exec } from "child_process";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
-const UPLOAD_DIR = path.join(process.cwd(), "storage");
+const UPLOAD_DIR = path.join(process.cwd(), process.env.DATA_DIR as string);
+if (!UPLOAD_DIR) {
+  throw new Error("UPLOAD_DIR is not set");
+}
 
 // Recursively calculate directory size
 async function calculateDirectorySize(dirPath: string): Promise<number> {
